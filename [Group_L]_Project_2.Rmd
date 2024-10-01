@@ -1,0 +1,667 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+# Đề bài
+Xét file dữ liệu house_sales.csv cung cấp dữ liệu về giá bán nhà ở King County (Seattle), Washington. Hãy đọc dữ liệu và:
+- thực hiện các mô tả tổng hợp cho các biến được ghi chép trong dữ liệu (lựa chọn dạng mô tả thống kê phù hợp với dạng biến),
+- xây dựng các mô hình tiên đoán giá bán nhà (adj_sale_price) theo các biến được thu thập trong dữ liệu,
+- thực hiện các thống kê suy luận cho mô hình vừa xây dựng (kiểm định sự có nghĩa của các hệ số, khoảng tin cậy, khoảng tiên đoán),
+- đánh giá các mô hình được đề xuất (sử dụng cross-validation),
+- vẽ một số hình minh họa cho kết quả của mô hình được cho là tốt nhất (sử dụng cross-validation).
+
+# 1. EDA
+## Loading packages
+```{r}
+library(tidyverse)
+library(janitor)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(DT)
+library(caret)
+library(leaflet)
+library(corrplot)
+library(boot) #for diagnostic plots
+```
+
+## Reading data
+```{r}
+rm(list = ls())
+fillColor = "#FFA07A"
+fillColor2 = "#F1C40F"
+data = read_csv("datasets/house_sales.csv") |> clean_names()
+glimpse(data)
+```
+adj_sale_price: giá bán của bất động sản được hiệu chỉnh
+land_val: giá trị của mảnh đất
+imps_val: giá trị của các cải tạo 
+sale_price: giá bán của bất động sản
+sq_ft_tot_living: diện tích tổng cộng của không gian sống
+bldg_grade: chất lượng của công trình xây dựng 
+sq_ft_lot: diện tích lô đất của bất động sản
+bathroms: số phòng tắm 
+bedrooms: số phòng ngủ
+nbr_living_unit: số lượng đơn vị sử dụng sông trong bất động sản. nó chỉ ra có bao nhiêu dơn vị (căn hộ, căn hộ riêng lẻ, phòng cho thuê) trong 1 toà nhà hoặc một khu đất cụ thể
+yr_build:năm xây dựng bất động sản
+yr_renovated: năm mà bất động sản được cải tạo lần cuối
+trafic_noise: mức độ ồn giao thông gần bất động sản
+sq_ft_fin_basement: diện tích của phòng ngủ đã hoàn thành trong tầng hầm của bất động sản(có thể bằng 0) 
+
+## checking null
+```{r}
+sum(is.na(data))
+```
+Dữ liệu đã cho không có giá trị thiếu
+
+## data summary
+```{r}
+data|>summary()
+```
+## plot histogram of adj_sale_price
+```{r}
+ggplot(data, aes(adj_sale_price)) +
+  geom_histogram(aes(fill = ..count..), bins = 30)+
+  scale_fill_gradient("count", low = "white", high = "blue")+
+  labs(title = "Price histogram", x = "Price", y = "Count")
+```
+adj_sale_price có dấu hiệu skewed khi mà các giá trị của biến quá cao và tập trung thành 1 cụm khiến cho chúng ta khó mà quan sát rõ được sự phân bổ của nó. Nên Ta sẽ lấy log biến price để chuyển sang dạng phân phối chuẩn (normal distribution)
+
+```{r}
+ggplot(data, aes(log(adj_sale_price))) +
+  geom_histogram(aes(fill = ..count..), bins = 30)+
+  scale_fill_gradient("count", low = "white", high = "blue")+
+  labs(title = "Price histogram", x = "Price", y = "Count")
+```
+
+
+## Plot histogram on numerical features
+```{r}
+# Lấy tên của các feature từ tập dữ liệu
+num_cols = colnames(data)[sapply(data, is.numeric)]
+# Vẽ histogram cho từng feature
+for(feature in num_cols){
+  print(ggplot(data, mapping = aes(.data[[feature]])) +
+    geom_histogram(bins = 30)) +
+    labs(title = paste("Histogram of", feature),
+           x = feature,
+           y = "Frequency") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+}
+```
+
+## Chuyển định dang của cột 'document_date' sang dạng datetime. Vẽ biểu đồ xem sự thay đổi của sale_price theo document_date
+```{r}
+data_temp = data |> mutate(doc_date = as.Date(document_date, format = "%m/%d/%Y"))
+ggplot(data_temp, aes(x = doc_date, y = adj_sale_price))+
+  geom_line() +
+  labs(x = "Date", y = "Adjusted Sale Price") +
+  theme_minimal()
+```
+Giá nhà hầu hết là giảm qua các năm, nhận thấy giá bán cao nhất trong một năm thường vào khoảng giữa năm.
+Giá nhà ở King County đã lên đỉnh điểm đầu năm 2006 rồi bắt đầu giảm dần suốt thời gian sau đó cho đến tận năm 2012. Việc nhà đất mất giá như vậy là do ảnh hưởng của cuộc khủng khoảng kinh tế Mỹ 2008.
+
+
+## Tách document_date thành day, month, year. Vẽ biểu đồ trực quan ảnh hưởng của khoảng thời gian trong năm lên trung bình của adj_sale_price 
+```{r}
+data_temp = data_temp |> mutate(day = day(doc_date), month = month(doc_date), year = year(doc_date)) 
+for (col in c("day", "month", "year")){
+  print(ggplot(data_temp, aes(x = .data[[col]], y = adj_sale_price))+
+  geom_line() +
+  labs(x = col, y = "Adjusted Sale Price") +
+  theme_minimal())
+}
+```
+Theo trung bình
+```{r}
+columns = c("month", "day", "year")
+
+for (col in columns) {
+  avg_price = data_temp |>
+    group_by(!!sym(col)) |>
+    summarise(avg_adj_price = mean(adj_sale_price, na.rm = TRUE))
+  
+  print(ggplot(avg_price, aes_string(x = col, y = "avg_adj_price")) +
+    geom_line() +
+    labs(x = col, y = "Average Adjusted Sale Price", title = paste("Average Adjusted Sale Price by", col)) +
+    theme_minimal())
+}
+
+```
+- Theo năm
+Từ cuối 2005 - 2013: giá nhà trung bình tăng giảm không đều đến. Và sau đó giảm mạnh đến đầu 2015  
+Nguyên nhân có thể do ảnh hưởng của cuộc khủng hoảng kinh tế Mỹ 2008
+- Theo tháng
+Giá nhà trung bình thường tăng trong khoảng những tháng giữa năm: từ tháng 5 - 7, cao nhất là vào tháng 6
+
+## So sánh 'document_date' và 'ym'
+```{r}
+data_temp = data |> mutate(document_date = as.Date(document_date, format = "%m/%d/%Y"),
+                           ym = as.Date(ym, format = "%m/%d/%Y"),
+                           doc_sub_ym = document_date - ym)
+data_temp["doc_sub_ym"] |> arrange(desc(doc_sub_ym))
+```
+Thời gian cách nhau của "document_date" và "ym" không đáng kể. Ta có thể xoá một trong hai cột.
+
+## Plot boxplot for sale_price based on categorical features
+```{r}
+for (feature in c("property_type", "new_construction")){
+  print(ggplot(data, aes(x = .data[[feature]], y = sale_price)) +
+  geom_boxplot() +
+  labs(title = paste("Sale Price by ", feature),
+       x = feature,
+       y = "Median Sale Price") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+print(ggplot(data, aes(x = .data[[feature]], y = sale_price)) +
+  geom_bar(stat = "summary", fun = "median", fill = "lightblue", color = "blue") +
+  labs(title = paste("Median Sale Price by ", feature),
+       x = feature,
+       y = "Median Sale Price")  +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+}
+
+```
+## plot correlation between numerical features
+```{r}
+corrplot(cor(data[num_cols]), type = "upper", order = "hclust", method = "color", tl.col="black", tl.srt=90)
+```
+- Từ biểu đồ trên, ta có nhận xét:
+adj_sale_price có tương quan thuận khá mạnh  với sale_price, land_val,imps_val,sq_ft_tot_living, bldg_grade từ 0.4 đến 0.9
+sale_price có tương quan thuận khá mạnh với adj_sale_price, land_val,imps_val,sq_ft_tot_living, bldg_grade từ 0.4 đến 0.9
+sq_ft_lot có tương quan thuận nhẹ với sale_price, adj_sale_price, sq_ft_tot_living cỡ 0.15
+sq_ft_tot_living có tương quan thuận khá mạnh với adj_sale_price, sale_price, land_val, imps_val, sq_ft_tot_living, bldg_grade, bedrooms, bathrooms từ 0.5 đến 0.9
+bathrooms: có tương quan mạnh với bedrooms
+bldg_grade: có tương quan mạnh với sale_price, adj_sale_price, sq_ft_tot_living, yr_build, land_val, imps_val khoảng 0.4 đến 0.9
+new_construction: có tương quan nghịch mạnh với yr_build
+
+- Dựa vào nhận xét về mối quan hệ tương quan giữa các biến, ta có thể đưa ra một số nhận xét chi tiết với góc nhìn kinh tế:
+
+adj_sale_price và sale_price: Mối quan hệ tương quan mạnh mẽ giữa adj_sale_price và sale_price chỉ ra rằng giá bán được hiệu chỉnh có ảnh hưởng mạnh mẽ đến giá bán thực tế. Điều này có thể phản ánh sự điều chỉnh giá bán dựa trên các yếu tố khác như giá trị đất, giá trị cải tạo, diện tích sống tổng cộng và chất lượng công trình xây dựng.
+
+Giá trị đất (land_val) và giá trị cải tạo (imps_val): Tương quan mạnh mẽ với adj_sale_price và sale_price cho thấy rằng giá trị của đất và giá trị cải tạo đóng vai trò quan trọng trong xác định giá bán của bất động sản. Điều này phản ánh sự ảnh hưởng của các yếu tố về vị trí, tiện ích xung quanh và chất lượng xây dựng đối với giá bán.
+
+Diện tích sống tổng cộng (sq_ft_tot_living): Tương quan mạnh mẽ với giá bán chỉ ra rằng diện tích sống tổng cộng là một yếu tố quan trọng trong xác định giá bán của bất động sản. Những người mua thường tìm kiếm không gian sống lớn hơn và sẵn lòng trả giá cao hơn cho những bất động sản có diện tích lớn.
+
+Chất lượng công trình xây dựng (bldg_grade): Tương quan mạnh mẽ với giá bán chỉ ra rằng chất lượng của công trình xây dựng có ảnh hưởng đáng kể đến giá bán của bất động sản. Các bất động sản có chất lượng xây dựng cao thường được đánh giá cao và có giá bán cao hơn.
+
+Số lượng phòng tắm (bathrooms) và phòng ngủ (bedrooms): Mối quan hệ mạnh mẽ giữa số lượng phòng tắm và phòng ngủ chỉ ra rằng các yếu tố này thường đi kèm với nhau trong bất động sản. Những người mua thường tìm kiếm bất động sản với đủ phòng ngủ và phòng tắm phục vụ nhu cầu của gia đình.
+
+
+
+
+
+
+
+
+# 2. Feature Engineering
+```{r}
+colnames(data)
+```
+## Tạo 1 biến bản sao lưu datafram data
+```{r}
+df = data
+```
+
+## Nhận thấy: trong data 
+- Có cột "document_date" và "ym" có giá trị không mấy khác biệt, ta sẽ drop một trong hai cột, cột "ym" sẽ được loại bỏ.
+- Cột "zhvi_idx" và "zhvi_px" có phân phối như nhau. Loại bỏ cột "zhvi_idx"
+- Loại bỏ cột "property_id" do không cần thiết 
+- Chuyển các biến categorical sang dạng factor
+- Chuyển cột "document_date" thành 3 cột "day", "month", "year"
+```{r}
+# Chuyển cột "document_date" thành 3 cột "day", "month", "year". Loại bỏ cột document_date
+df = df |>
+  mutate(day = as.numeric(day(as.Date(document_date, "%m/%d/%Y"))),
+         month = as.numeric(month(as.Date(document_date, "%m/%d/%Y"))),
+         year = as.numeric(year(as.Date(document_date, "%m/%d/%Y")))
+         ) |>
+  select(-document_date)  
+
+# Chuyển các biến "bldg_grade", "zip_code", "property_type", "new_construction"  sang dạng factor
+df$bldg_grade = factor(df$bldg_grade)
+df$zip_code = factor(df$zip_code)
+df$new_construction = factor(df$new_construction)
+
+property_type_encoded = model.matrix(~ property_type - 1, data = df)
+df = cbind(df, property_type_encoded)
+df = df[, -which(names(df) == "property_type")]
+
+
+# Drop cột "property_id", "ym", "zhvi_idx"
+df = df |> select(-c(ym, zhvi_idx,property_id))
+```
+
+## Replace yr_renovated
+```{r}
+# In ra số lượng nhà mà chưa từng được sửa sang (Yr_renovated =0) 
+length(df$yr_renovated[df$yr_renovated == 0])
+```
+Hầu hết các nhà đều chưa có tiền lệ sửa sang ( 20699 nhà trong tổng số 21613), ta sẽ xoá biến yr_renovated đi do năm sửa sang của căn nhà thực sự không ảnh giá nhà nhiều lắm, ta sẽ thêm 1 biến mới thay thế là biến renovated chỉ ra rằng căn nhà đã từng được sửa sang hay chưa (biến dạng category)
+```{r}
+# Tạo ra 1 biến mới renovated = 1 khi đã từng sửa sang và =0 khi chưa từng sửa sang
+df$renovated = ifelse(df$yr_renovated == 0, 0, 1)
+# Chuyển biến category renovated sang dạng factor
+df$renovated = as.factor(df$renovated)
+# Xoá biến yr_renovated
+df$yr_renovated = NULL
+```
+
+## Replace sqft_basement
+```{r}
+# In ra số lượng nhà mà có tầng hầm (sqft_basement = 0) 
+length(df$sq_ft_fin_basement[df$sq_ft_fin_basement == 0])
+```
+Có rất nhiều ngôi nhà không có tầng hầm (13126 căn nhà), do biến sqft_basement= sqft_living - sqft_above nên ta không cần tới biến sqft_basement nữa khi 2 biến kia là đã đủ, ta sẽ xoá biến sqft_basement nhằm tránh hiện tượng multicolinearity ( hiện tượng xảy ra khi có 2 hoặc nhiều biến độc lập tương quan lẫn nhau dẫn đến tăng sai số cho các hệ số, dư thừa dữ liệu không cần thiết và khiến hệ số của biến đó = NA trong quá trình training model), xoá biến sqft_basement sẽ không giảm R_sqared nhiều lắm. Ta sẽ thêm 1 biến thay thế là basement để ám chỉ nhà có tầng hầm hay không
+```{r}
+# Tạo ra 1 biến mới basement = 1 với nhà có tầng hồm và =0 cho nhà không có tầng hầm
+df$basement = ifelse(df$sq_ft_fin_basement == 0, 0, 1)
+# Chuyển biến category basement sang dạng factor
+df$basement = as.factor(df$basement)
+# Xoá biến sqft_basement
+df$sq_ft_fin_basement = NULL
+```
+
+## Replace yr_built
+Biến yr_built (năm xây căn nhà) thực sự không rõ ràng và không ảnh hưởng đến giá nhà nên ta sẽ thay bằng 1 biến khác ám chỉ tuổi thọ căn nhà.
+```{r}
+# Tạo ra 1 biến mới HouseAge nhằm ám chỉ tuổi thọ căn nhà ở thời điểm bán với tuổi thọ được tính = ngày mua - ngày ngôi nhà được xây
+df$houseAge = df$year - df$yr_built
+# Xoá biến yr_built
+df$yr_built = NULL
+```
+
+Xoá luôn biến zip_code vì biến này tượng trưng mã bưu điện của vùng không thực sự ảnh hưởng giá nhà, biến này là dạng categorical có hơn 53 giá trị nên nếu mã hoá thì có thể gây overfit do quá nhiều biến đầu vào. zip_code nếu chuyển sang dạng factor thì có sẽ mã hoá hơn 53 giá trị rời rạc nên không thể sử dụng mô hình random forest, nên ta sẽ bỏ biến này
+```{r}
+df = df |> select(-zip_code)
+glimpse(df)
+```
+
+# 3. Building models to predict house selling prices (adj_sale_price)
+
+## Train test splitting
+Sử dụng tập train 70% để huấn luyện mô hình và tập test để thực nghiệm mô hình
+```{r}
+set.seed(21)
+
+train_test_split = function(data, test_size){
+  ind = sample(nrow(data), size = nrow(data) * test_size, replace = FALSE)
+  train = data[-ind,]
+  test = data[ind,]
+  
+  return(list("train" = train, "test" = test))
+}
+
+feature = colnames(df) 
+feature = subset(feature, feature != "adj_sale_price")
+
+train_test = train_test_split(data = df, test_size = 0.3)
+train = train_test$train
+test = train_test$test
+```
+
+
+## Modelling
+
+### Simple Linear Regression
+Dùng biến sale_price để dự đoán giá trị cho adj_sale_price
+```{r}
+ggplot(train, aes(x = sale_price, y = adj_sale_price)) +
+  geom_point() 
+```
+build model 
+```{r}
+simple_model = lm(adj_sale_price ~ sale_price, data=train)
+simple_model
+```
+
+### Multiple linear regression
+```{r}
+multi_model = lm(formula = adj_sale_price~., data = train)
+summary(multi_model)
+```
+
+
+
+
+
+
+# 4. Thực hiện các thống kê suy luận cho mô hình
+Ta áp dụng phương pháp bootstrap để ước lượng khoảng tin cậy và kiểm định giả thuyết βj = 0. 
+Trước tiên, ta định hàm fun_boot_md() để thực hiện ước tính mỗi lần lặp lấy mẫu:
+```{r}
+fun_boot_md = function(data, ind, formula, ...){
+  data_new = data[ind,]
+  out_md = lm(formula = formula, data = data_new, ...)
+  return(out_md$coefficients)
+}
+```
+
+“Có thực sự tồn tại mối liên hệ giữa biến Xj và Y ”.
+Xây dựng hàm kiểm định hệ số 
+```{r}
+# Hàm kiểm định cho hệ số 
+create_results_dataframe = function(model, boot_model, conf_level = 0.95) {
+  # Tính ước lượng cho các hệ số từ mô hình hồi quy
+  est = coef(model)
+  
+  # Tính độ lệch chuẩn của ước lượng hệ số từ bootstrap
+  se = apply(boot_model$t, 2, sd)
+  
+  # Tính khoảng tin cậy 95% cho các hệ số từ bootstrap
+  ci_95 = sapply(1:ncol(boot_model$t), function(i) {
+    CI = boot.ci(boot_model, index = i, type = "perc", conf = conf_level)$percent[1, 4:5]
+    paste0("(", round(CI[1], 2), ", ", round(CI[2], 2), ")")
+  })
+  
+  # Tính p-value cho các hệ số từ bootstrap
+  p_values = sapply(1:ncol(boot_model$t), function(x) {
+    qt0 = mean(boot_model$t[, x] <= 0)
+    if (qt0 < 0.5) {
+      return(2*qt0)
+    } else {
+      return(2*(1 - qt0))
+    }
+  })
+  
+  # Tạo dataframe
+  df_results = data.frame(
+    Est = est,
+    SE = se,
+    CI_95 = ci_95,
+    p_value = p_values,
+    row.names = names(est)
+  )
+  
+  # Vẽ histogram của các kết quả ước lượng bootstrap của hệ số
+  num_cols_per_row = 4
+  num_rows <- ceiling(length(est) / num_cols_per_row)
+  par(mfrow = c(num_rows, num_cols_per_row))
+  for (i in 1:length(est)) {
+    hist(boot_model$t[, i], main = names(est)[i], xlab = names(est)[i])
+  }
+  
+  return(df_results)
+}
+```
+
+## Với simple model
+```{r}
+simple_model = lm(adj_sale_price ~ sale_price, data=train)
+out_boot_simple_model = boot(data = train, statistic = fun_boot_md, R = 1000,
+formula = adj_sale_price ~ sale_price)
+```
+### Kiểm định cho hệ số
+```{r}
+# Sử dụng hàm
+results_df = create_results_dataframe(model = simple_model, boot_model = out_boot_simple_model)
+print(results_df)
+```
+
+### Khoảng tin cậy cho trung bình
+Cho dữ liệu được lấy từ tập test_normalized
+```{r}
+sale_price_test = test$sale_price[1]
+sale_price_test
+```
+Khi đó, dựa vào mô hình, ta có thể ước tính được trung bình doanh số adj_sale_price là
+```{r}
+# Dự đoán adj_sale_price khi sale_price = sale_price_test
+predicted_adj_sale_price = predict(simple_model, newdata = data.frame(sale_price = sale_price_test))
+predicted_adj_sale_price
+```
+Và để tìm khoảng tin cậy cho giá trị trung bình doanh số doanh số adj_sale_price hàng, ta sử dụng phương pháp bootstrap. Vì, ta đã chạy bootstrap ở phần trước với 1000 lần lặp để ước tính các hệ số, ta có thể sử dụng kết quả này để tính các giá trị ước đoán trung bình doanh số doanh số adj_sale_price trong mỗi lần lặp mẫu:
+```{r}
+x_data = c(459950)
+y_data = apply(out_boot_simple_model$t, 1, function(x){x_data %*% x})
+quantile(y_data, probs = c(0.025, 0.975))
+```
+
+### Ước lượng khoảng tiên đoán 
+```{r}
+resid_data = residuals(simple_model)
+y_data_pd_pci = y_data + sample(resid_data, size = 1000, replace = TRUE)
+quantile(y_data_pd_pci, probs = c(0.025, 0.975))
+
+```
+
+
+
+
+# 5. Đánh giá mô hình
+```{r}
+# Dự đoán giá trị trên tập test
+predictions <- predict(simple_model, newdata = test)
+
+# Tính toán RMSE
+RMSE_value <- RMSE(predictions, test$adj_sale_price)
+
+# Tính toán MAE
+MAE_value <- MAE(predictions, test$adj_sale_price)
+
+# Tính toán R-squared
+R_squared <- R2(predictions, test$adj_sale_price)
+
+# Hiển thị kết quả
+cat("RMSE:", RMSE_value, "\n")
+cat("MAE:", MAE_value, "\n")
+cat("R-squared:", R_squared, "\n")
+```
+
+# vẽ một số hình minh họa cho kết quả của mô hình được cho là tốt nhất (sử dụng cross-validation)
+## Biểu đồ actual vs. predicted prices
+```{r}
+# Create a scatter plot of actual vs. predicted prices
+ggplot(data.frame(Actual = test$adj_sale_price, Predicted = predictions), aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(color = "red", linetype = "dashed") +
+  labs(x = "Actual Price", y = "Predicted Price", title = "Actual vs. Predicted Prices")
+```
+
+
+
+```{r}
+# Create a scatter plot of the residuals
+ggplot(data.frame(Residuals = test$adj_sale_price - predictions), aes(x = 1:length(Residuals), y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Sample Index", y = "Residuals", title = "Scatter Plot of Residuals")
+```
+
+## Biểu đồ Residuals vs. Fitted Values
+```{r}
+ggplot(data.frame(Residuals = test$adj_sale_price - predictions, 
+                  Fitted = predictions), aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "gam", formula = y ~ s(x), color = "blue") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Residuals vs. Fitted Values")
+```
+Hình vẽ cho thấy một xu hướng đường cong rõ ràng 
+-> Giả định về tính tuyến tính của mô hình là không phù hợp.
+
+
+Với những giá trị nhỏ (0 < Fitted Values < 1.6e+06) ta không thấy một xu hướng đường cong nào đáng kể -> Giả định về tính tuyến tính của mô hình đối với các giá trị này là phù hợp.
+Đối với những giá trị lớn hơn (Fitted Values > 1.6e+06) bị ảnh hưởng bởi các giá trị ngoại lai, nên xu hướng đường cong khá rõ ràng -> Giả định về tính tuyến tính của mô hình là không phù hợp cho các giá trị này.
+
+
+
+
+## Với multiple model 
+
+```{r}
+library(corrplot)
+corrplot(cor(data[ ,c('sale_price','bathrooms','bedrooms','land_val',
+                             'sq_ft_tot_living','sq_ft_lot','imps_val','zip_code',
+                             'sq_ft_fin_basement','bldg_grade')]),
+         method = "ellipse")
+```
+Qua các mô tả tổng hợp trên, có thể thấy các biến có tương quan dương mạnh nhất
+với sale_price có thể kể đến là imps_val, land_val, sq_ft_tot_living, bldg_grade, 
+bathrooms và bedrooms.
+
+```{r}
+ggplot(data = data) + 
+  geom_point(mapping = aes(x = land_val, y = sale_price)) + 
+  facet_wrap(~ property_type, nrow = 2)
+```
+
+
+```{r}
+pairs(~sale_price+bathrooms+sq_ft_tot_living+bldg_grade+imps_val+land_val, data=house_sales, main="High Positive Corr. ScatterPlot Matrix")
+```
+
+Biến phản hồi được quan tâm là sale_price - giá bán của bất động sản.
+Vậy mô hình được đề xuất dựa trên các biến có tương quan dương mạnh là:
+  adj_sale_price_i = β0 + β1.imps_val_i + β2.land_val_i +
+                      β3.sq_ft_tot_living_i + β4.bldg_grade_i +
+                      β5.bedrooms_i + β6.bathrooms_i + εi
+                      
+Ta ước lượng mô hình này như sau:
+
+```{r}
+house_lm <- lm(adj_sale_price ~ imps_val + land_val + sq_ft_tot_living +
+                 bldg_grade + bedrooms + bathrooms, data = house_sales, na.action=na.omit)
+house_lm
+```
+
+```{r}
+summary(house_lm)
+```
+
+
+
+```{r}
+library(caTools)
+set.seed(125) 
+hr=select(data, adj_sale_price, imps_val, land_val, sq_ft_tot_living, bldg_grade, 
+bathrooms, bedrooms)
+set.seed(123)
+split=sample.split(hr$adj_sale_price, SplitRatio = 0.8)
+training_set=subset(hr, split==TRUE)
+test_set=subset(hr, split==FALSE)
+regressor=lm(formula=adj_sale_price~., data=training_set)
+summary(regressor)
+```
+
+R-squared đạt giá trị 0.8697, cho thấy đây là một mô hình khá tốt.
+
+```{r}
+set.seed(125) 
+ 
+# defining training control
+# as cross-validation and 
+# value of K equal to 10
+train_control <- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+
+# training the model by assigning sales column
+# as target variable and rest other column
+# as independent variable
+model <- train(adj_sale_price ~., data = training_set, 
+               method = "lm", trControl = train_control)
+
+print(model)
+```
+
+
+```{r}
+fun_boot_md <- function(data, ind, formula, ...){ #ước tính mỗi lần lặp lấy mẫu
+  data_new <- data[ind,]
+  out_md <- lm(formula = formula, data = data_new, ...)
+  return(out_md$coefficients)
+}
+set.seed(84)
+out_boot_md_adv <- boot(data = training_set, statistic = fun_boot_md, R = 1000,
+                        formula = adj_sale_price ~ imps_val + land_val + sq_ft_tot_living +
+                 bldg_grade + bedrooms + bathrooms)
+out_boot_md_adv
+```
+
+
+
+### Kiểm định cho hệ số
+```{r}
+# Sử dụng hàm
+results_df = create_results_dataframe(model = house_lm, boot_model = out_boot_md_adv)
+print(results_df)
+```
+
+
+
+```{r}
+# khoảng tin cậy cho các hệ số
+confint(house_lm)
+```
+
+
+```{r}
+# Tính khoảng tiên đoán
+newdata <- data.frame(imps_val = mean(house_sales$imps_val),
+                      land_val = mean(house_sales$land_val),
+                      sq_ft_tot_living = mean(house_sales$sq_ft_tot_living),
+                      bldg_grade = mean(house_sales$bldg_grade),
+                      bedrooms = mean(house_sales$bedrooms),
+                      bathrooms = mean(house_sales$bathrooms))
+predict(house_lm, newdata, interval = "prediction")
+```
+
+# 5. Đánh giá mô hình
+```{r}
+# Dự đoán giá trị trên tập test
+predictions_mul <- predict(house_lm, newdata = test_set)
+
+# Tính toán RMSE
+RMSE_value <- RMSE(predictions_mul, test_set$adj_sale_price)
+
+# Tính toán MAE
+MAE_value <- MAE(predictions_mul, test_set$adj_sale_price)
+
+# Tính toán R-squared
+R_squared <- R2(predictions_mul, test_set$adj_sale_price)
+
+# Hiển thị kết quả
+cat("RMSE:", RMSE_value, "\n")
+cat("MAE:", MAE_value, "\n")
+cat("R-squared:", R_squared, "\n")
+```
+
+
+# vẽ một số hình minh họa cho kết quả của mô hình được cho là tốt nhất (sử dụng cross-validation)
+## Biểu đồ actual vs. predicted prices
+```{r}
+# Create a scatter plot of actual vs. predicted prices
+ggplot(data.frame(Actual = test_set$adj_sale_price, Predicted = predictions_mul), aes(x = Actual, y = Predicted)) +
+  geom_point() +
+  geom_abline(color = "red", linetype = "dashed") +
+  labs(x = "Actual Price", y = "Predicted Price", title = "Actual vs. Predicted Prices")
+```
+
+
+```{r}
+# Create a scatter plot of the residuals
+ggplot(data.frame(Residuals = test_set$adj_sale_price - predictions_mul), aes(x = 1:length(Residuals), y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Sample Index", y = "Residuals", title = "Scatter Plot of Residuals")
+```
+
+## Biểu đồ Residuals vs. Fitted Values
+```{r}
+ggplot(data.frame(Residuals = test_set$adj_sale_price - predictions_mul, 
+                  Fitted = predictions_mul), aes(x = Fitted, y = Residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(method = "gam", formula = y ~ s(x), color = "blue") +
+  labs(x = "Fitted Values", y = "Residuals", title = "Residuals vs. Fitted Values")
+```
+Hình vẽ cho thấy một xu hướng đường cong rõ ràng từ khoảng Fitted Values > 2e+06
+-> Giả định về tính tuyến tính của mô hình là không phù hợp.
+
+Với những giá trị nhỏ (0 < Fitted Values < 2e+06) ta không thấy một xu hướng đường cong nào đáng kể -> Giả định về tính tuyến tính của mô hình đối với các giá trị này là phù hợp.
+Đối với những giá trị lớn hơn (Fitted Values > 2e+06) bị ảnh hưởng bởi các giá trị ngoại lai, nên xu hướng đường cong khá rõ ràng -> Giả định về tính tuyến tính của mô hình là không phù hợp cho các giá trị này.
+
